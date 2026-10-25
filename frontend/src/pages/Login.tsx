@@ -17,17 +17,24 @@ const Login = () => {
     setLoading(true);
 
     try {
-      const response = await api.post("token/", {
+      const response = await api.post("login/", {
         username,
         password,
       });
 
-      localStorage.setItem("access", response.data.access);
-      localStorage.setItem("refresh", response.data.refresh);
+      const { access, refresh } = response.data.tokens;
 
-      navigate("/");
-    } catch {
-      setError("Invalid username or password.");
+      if (!access || !refresh) {
+        throw new Error("Login response did not contain tokens.");
+      }
+
+      localStorage.setItem("access", access);
+      localStorage.setItem("refresh", refresh);
+
+      navigate("/", { replace: true });
+    } catch (error) {
+      console.error("Login failed:", error);
+      setError("Login failed. Please check your credentials or try again.");
     } finally {
       setLoading(false);
     }

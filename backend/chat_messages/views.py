@@ -18,7 +18,7 @@ def message_view(request, conversation_id):
         id=conversation_id,
     )
 
-    # Check whether the current user belongs to this conversation.
+
     is_member = conversation.members.filter(id=request.user.id).exists()
 
     if not is_member:
@@ -27,7 +27,6 @@ def message_view(request, conversation_id):
             status=status.HTTP_403_FORBIDDEN,
         )
 
-    # Fetch messages.
     if request.method == "GET":
         messages = (
             Message.objects.filter(conservation=conversation)
@@ -35,11 +34,18 @@ def message_view(request, conversation_id):
             .order_by("created_at")
         )
 
-        serializer = MessageSerializer(messages, many=True)
+        serializer = MessageSerializer(
+            messages,
+            many=True,
+            context={"request": request},  
+        )
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     # Create a message.
-    serializer = MessageSerializer(data=request.data)
+    serializer = MessageSerializer(
+        data=request.data,
+        context={"request": request}, 
+    )
 
     if serializer.is_valid():
         serializer.save(

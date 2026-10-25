@@ -1,5 +1,6 @@
+import type { ApiGroup, ChatMessage } from "../components/chat/types";
 import api from "#lib/axiosInstance";
-import type { ChatMessage } from "../components/chat/types";
+
 
 const CONVERSATION_ENDPOINT = "/conversations";
 const MESSAGE_ENDPOINT = "/messages";
@@ -38,4 +39,12 @@ export async function createMessage(
   );
 
   return response.data;
+  
+}
+
+
+export async function getConversations(): Promise<ApiGroup[]> {
+  const response = await api.get(`${CONVERSATION_ENDPOINT}/`);
+  const data = response.data;
+  return Array.isArray(data) ? data : (data.results ?? []);
 }

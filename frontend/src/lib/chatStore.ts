@@ -1,107 +1,195 @@
 import { create } from "zustand";
 
-import {
-  CONVERSATIONS_ENDPOINT,
-  CREATE_CONVERSATION_ENDPOINT,
-  USERS_ENDPOINT,
-} from "../lib/constants";
-
-import api from "#lib/axiosInstance";
+import { getConversations } from "#lib/messageApi";
+import { getUsers } from "#lib/userApi";
 import type { ApiGroup, ApiUser, Conversation } from "../components/chat/types";
-import {
-  extractList,
-  getErrorMessage,
-  groupToConversation,
-  userToConversation,
-} from "./utils";
+
+/* ---------- Helpers ---------- */
+
+const AVATAR_COLORS = [
+  "bg-rose-500",
+  "bg-orange-500",
+  "bg-amber-500",
+  "bg-emerald-500",
+  "bg-teal-500",
+  "bg-sky-500",
+  "bg-violet-500",
+  "bg-fuchsia-500",
+];
+
+function colorFor(seed: string): string {
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) {
+    hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
+  }
+  return AVATAR_COLORS[hash % AVATAR_COLORS.length] ?? "bg-slate-500";
+}
+
+function initialsFor(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  const first = parts[0] ?? "";
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return first.slice(0, 2).toUpperCase();
+  const last = parts[parts.length - 1] ?? "";
+  return `${first[0] ?? ""}${last[0] ?? ""}`.toUpperCase();
+}
+
+function userDisplayName(user: ApiUser): string {
+  const full = [user.first_name, user.last_name]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+
+  return full || user.username || user.email || `User ${user.id}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function toId(value: unknown): string | null {
+  if (typeof value === "string" || typeof value === "number") {
+    return String(value);
+  }
+
+  if (isRecord(value)) {
+    const id = value.id;
+    if (typeof id === "string" || typeof id === "number") return String(id);
+  }
+
+  return null;
+}
+
+function memberUserId(member: unknown): string | null {
+  if (!isRecord(member)) return toId(member);
+  if ("user" in member) return toId(member.user);
+  if ("user_id" in member) return toId(member.user_id);
+  return toId(member.id);
+}
+
+/* ---------- Store ---------- */
 
 type ChatState = {
-
+  currentUserId: string | null;
+  meAliases: string[];
   users: Conversation[];
   groups: Conversation[];
-  loading: boolean;
-  error: string | null;
-
-
-  search: string;
   selectedKey: string | null;
-  groupDialogOpen: boolean;
+  loading: boolean;
+  loaded: boolean;
+  error: string;
+  search: string;
 
-
-  fetchConversations: (signal?: AbortSignal) => Promise<void>;
-  setSearch: (value: string) => void;
+  fetchConversations: (currentUserId?: string) => Promise<void>;
+  setSearch: (search: string) => void;
   selectConversation: (key: string | null) => void;
-  setGroupDialogOpen: (open: boolean) => void;
-  createGroup: (name: string, memberKeys: string[]) => Promise<void>;
+  setConversationId: (key: string, conversationId: string) => void;
+  reset: () => void;
+};
+
+const initialState = {
+  currentUserId: null,
+  meAliases: [] as string[],
+  users: [] as Conversation[],
+  groups: [] as Conversation[],
+  selectedKey: null,
+  loading: false,
+  loaded: false,
+  error: "",
+  search: "",
 };
 
 export const useChatStore = create<ChatState>()((set, get) => ({
-  users: [],
-  groups: [],
-  loading: true,
-  error: null,
+  ...initialState,
 
-  search: "",
-  selectedKey: null,
-  groupDialogOpen: false,
+  fetchConversations: async (currentUserId) => {
+    if (get().loading) return;
 
-  fetchConversations: async (signal) => {
-    set({ loading: true, error: null });
+    const resolvedId = currentUserId ?? get().currentUserId;
 
-    const [usersRes, ConversationsRes] = await Promise.allSettled([
-      api.get(USERS_ENDPOINT, { signal }),
-      api.get(CONVERSATIONS_ENDPOINT, { signal }),
-    ]);
+    if (!resolvedId) {
+      set({ loaded: true, error: "Missing current user id." });
+      return;
+    }
 
-    if (signal?.aborted) return;
+    const me = String(resolvedId);
+    set({ loading: true, error: "", currentUserId: me });
 
-    set({
-      loading: false,
-      ...(usersRes.status === "fulfilled"
-        ? {
-            users: extractList<ApiUser>(usersRes.value.data).map(
-              userToConversation,
-            ),
-          }
-        : {
-            error: getErrorMessage(
-              usersRes.reason,
-              "Couldn't load your chats. Please try again.",
-            ),
-          }),
+    try {
+      const [apiUsers, apiConversations]: [ApiUser[], ApiGroup[]] =
+        await Promise.all([getUsers(), getConversations()]);
 
-      ...(ConversationsRes.status === "fulfilled"
-        ? {
-            groups: extractList<ApiGroup>(ConversationsRes.value.data)
-              .filter((c) => c.Conversation_type === "group")
-              .map(groupToConversation),
-          }
-        : {}),
-    });
+      const directByUser = new Map<string, string>();
+      const groups: Conversation[] = [];
+
+      for (const c of apiConversations) {
+        if (c.Conversation_type === "group") {
+          const name =
+            c.display_name?.trim() || c.name?.trim() || "Unnamed group";
+          const count = c.members_count ?? c.members?.length ?? 0;
+          const id = String(c.id);
+
+          groups.push({
+            key: `group:${id}`,
+            kind: "group",
+            apiId: id,
+            conversationId: id,
+            name,
+            subtitle: `${count} ${count === 1 ? "member" : "members"}`,
+            initials: initialsFor(name),
+            color: colorFor(`group:${id}`),
+          });
+          continue;
+        }
+
+        const otherId = (c.members ?? [])
+          .map(memberUserId)
+          .find((id) => id !== null && id !== me);
+
+        if (otherId) directByUser.set(otherId, String(c.id));
+      }
+
+      const users = apiUsers
+        .filter((u) => String(u.id) !== me)
+        .map((u): Conversation => {
+          const id = String(u.id);
+          const name = userDisplayName(u);
+
+          return {
+            key: `user:${id}`,
+            kind: "user",
+            apiId: id,
+            conversationId: directByUser.get(id),
+            name,
+            initials: initialsFor(name),
+            color: colorFor(`user:${id}`),
+          };
+        });
+
+      const meUser = apiUsers.find((u) => String(u.id) === me);
+      const meAliases = [me, meUser?.username, meUser?.email]
+        .filter((v): v is string => Boolean(v))
+        .map((v) => v.toLowerCase());
+
+      set({ users, groups, meAliases });
+    } catch (err) {
+      console.error("Failed to load sidebar:", err);
+      set({ error: "Failed to load conversations." });
+    } finally {
+      set({ loading: false, loaded: true });
+    }
   },
 
   setSearch: (search) => set({ search }),
 
-  selectConversation: (selectedKey) => set({ selectedKey }),
+  selectConversation: (key) => set({ selectedKey: key }),
 
-  setGroupDialogOpen: (groupDialogOpen) => set({ groupDialogOpen }),
-
-
-  createGroup: async (name, memberKeys) => {
-    const memberIds = get()
-      .users.filter((u) => memberKeys.includes(u.key))
-      .map((u) => u.apiId);
-
-    const { data } = await api.post(CREATE_CONVERSATION_ENDPOINT, {
-      Conversation_type: "group",
-      name,
-      member_ids: memberIds,
-    });
-    const group = groupToConversation(data);
-
+  setConversationId: (key, conversationId) =>
     set((state) => ({
-      groups: [group, ...state.groups.filter((g) => g.key !== group.key)],
-      selectedKey: group.key,
-    }));
-  },
+      users: state.users.map((u) =>
+        u.key === key ? { ...u, conversationId } : u,
+      ),
+    })),
+
+  reset: () => set({ ...initialState }),
 }));

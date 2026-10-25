@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { RefreshCw, Search } from "lucide-react";
 
 import { Button } from "#components/ui/button";
@@ -12,13 +12,15 @@ import ConversationAvatar from "./ConversationAvatar";
 import Header from "./Header";
 
 type Props = {
+  currentUserId: string;
   onLogout: () => void;
 };
 
-export default function Sidebar({ onLogout }: Props) {
+export default function Sidebar({ currentUserId, onLogout }: Props) {
   const users = useChatStore((s) => s.users);
   const groups = useChatStore((s) => s.groups);
   const loading = useChatStore((s) => s.loading);
+  const loaded = useChatStore((s) => s.loaded);
   const error = useChatStore((s) => s.error);
   const search = useChatStore((s) => s.search);
   const selectedKey = useChatStore((s) => s.selectedKey);
@@ -26,39 +28,44 @@ export default function Sidebar({ onLogout }: Props) {
   const selectConversation = useChatStore((s) => s.selectConversation);
   const fetchConversations = useChatStore((s) => s.fetchConversations);
 
-  
-  const Conversations = useMemo(() => {
+  useEffect(() => {
+    void fetchConversations(currentUserId);
+  }, [currentUserId, fetchConversations]);
+
+  const conversations = useMemo(() => {
     const all = [...groups, ...users];
     const query = search.trim().toLowerCase();
+
     if (!query) return all;
-    return all.filter(
-      (c) =>
-        c.name.toLowerCase().includes(query) ||
-        c.subtitle.toLowerCase().includes(query),
-    );
+
+    return all.filter((c) => c.name.toLowerCase().includes(query));
   }, [groups, users, search]);
 
+
+  const showSkeleton = loading || !loaded;
+
   return (
-    <aside className="flex w-full max-w-sm shrink-0 flex-col border-r bg-card md:w-[22rem] lg:w-96">
+    <div className="flex min-h-0 flex-1 flex-col">
       <Header onLogout={onLogout} />
 
       {/* Search */}
-      <div className="px-4 pb-3">
+      <div className="shrink-0 px-4 pb-3">
         <div className="relative">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search"
+            aria-label="Search conversations"
             className="h-9 rounded-full border-0 bg-muted pl-9 shadow-none focus-visible:ring-1"
           />
         </div>
       </div>
 
-      {/* List */}
-      <ScrollArea className="flex-1">
+
+      <ScrollArea className="min-h-0 flex-1">
         <div className="px-2 pb-2">
-          {loading &&
+          {showSkeleton &&
             Array.from({ length: 7 }).map((_, i) => (
               <div key={i} className="flex items-center gap-3 px-3 py-3">
                 <Skeleton className="h-12 w-12 rounded-full" />
@@ -69,13 +76,14 @@ export default function Sidebar({ onLogout }: Props) {
               </div>
             ))}
 
-          {!loading && error && (
+          {!showSkeleton && error && (
             <div className="flex flex-col items-center gap-3 p-6 text-center">
               <p className="text-sm text-muted-foreground">{error}</p>
               <Button
+                type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => fetchConversations()}
+                onClick={() => void fetchConversations()}
               >
                 <RefreshCw className="mr-2 h-4 w-4" />
                 Retry
@@ -83,43 +91,49 @@ export default function Sidebar({ onLogout }: Props) {
             </div>
           )}
 
-          {!loading &&
+          {!showSkeleton &&
             !error &&
-            Conversations.map((Conversation) => (
+            conversations.map((conversation) => (
               <button
-                key={Conversation.key}
-                onClick={() => selectConversation(Conversation.key)}
+                key={conversation.key}
+                type="button"
+                onClick={() => selectConversation(conversation.key)}
+                aria-current={
+                  selectedKey === conversation.key ? "true" : undefined
+                }
                 className={cn(
                   "flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left transition-colors",
-                  selectedKey === Conversation.key
+                  selectedKey === conversation.key
                     ? "bg-accent"
                     : "hover:bg-accent/50",
                 )}
               >
                 <ConversationAvatar
-                  Conversation={Conversation}
+                  Conversation={conversation}
                   className="h-12 w-12"
                 />
+
                 <div className="min-w-0 flex-1">
                   <h3 className="truncate text-[15px] font-semibold">
-                    {Conversation.name}
+                    {conversation.name}
                   </h3>
-                  {Conversation.subtitle && (
+
+                  {conversation.subtitle && (
                     <p className="mt-0.5 truncate text-sm text-muted-foreground">
-                      {Conversation.subtitle}
+                      {conversation.subtitle}
                     </p>
                   )}
                 </div>
               </button>
             ))}
 
-          {!loading && !error && Conversations.length === 0 && (
+          {!showSkeleton && !error && conversations.length === 0 && (
             <p className="p-6 text-center text-sm text-muted-foreground">
               {search.trim() ? "No chats found." : "No chats yet."}
             </p>
           )}
         </div>
       </ScrollArea>
-    </aside>
+    </div>
   );
 }
