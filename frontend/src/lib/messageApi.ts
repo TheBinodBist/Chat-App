@@ -14,6 +14,19 @@ export async function createConversation(userId: string) {
   return response.data;
 }
 
+export async function createGroupConversation(
+  name: string,
+  memberIds: string[],
+): Promise<ApiGroup> {
+  const response = await api.post(`${CONVERSATION_ENDPOINT}/create/`, {
+    Conversation_type: "group",
+    name,
+    member_ids: memberIds,
+  });
+
+  return response.data;
+}
+
 export async function getMessages(
   conversationId: string,
 ): Promise<ChatMessage[]> {

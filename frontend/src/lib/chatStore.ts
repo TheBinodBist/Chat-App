@@ -1,8 +1,9 @@
 import { create } from "zustand";
 
-import { getConversations } from "#lib/messageApi";
+import { createGroupConversation, getConversations } from "#lib/messageApi";
 import { getUsers } from "#lib/userApi";
 import type { ApiGroup, ApiUser, Conversation } from "../components/chat/types";
+import { groupToConversation } from "./utils";
 
 /* ---------- Helpers ---------- */
 
@@ -79,8 +80,11 @@ type ChatState = {
   loaded: boolean;
   error: string;
   search: string;
+  groupDialogOpen: boolean;
 
   fetchConversations: (currentUserId?: string) => Promise<void>;
+  createGroup: (name: string, memberIds: string[]) => Promise<void>;
+  setGroupDialogOpen: (open: boolean) => void;
   setSearch: (search: string) => void;
   selectConversation: (key: string | null) => void;
   setConversationId: (key: string, conversationId: string) => void;
@@ -97,6 +101,7 @@ const initialState = {
   loaded: false,
   error: "",
   search: "",
+  groupDialogOpen: false,
 };
 
 export const useChatStore = create<ChatState>()((set, get) => ({
@@ -190,6 +195,19 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         u.key === key ? { ...u, conversationId } : u,
       ),
     })),
+
+  createGroup: async (name, memberIds) => {
+    const group = await createGroupConversation(name, memberIds);
+    const conversation = groupToConversation(group);
+
+    set((state) => ({
+      groups: [conversation, ...state.groups],
+      selectedKey: conversation.key,
+      groupDialogOpen: false,
+    }));
+  },
+
+  setGroupDialogOpen: (open) => set({ groupDialogOpen: open }),
 
   reset: () => set({ ...initialState }),
 }));

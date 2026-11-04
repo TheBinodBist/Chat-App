@@ -257,11 +257,10 @@ export default function ChatSection() {
 
   // `null` means "don't connect". When conversationId changes, the old
   // socket is closed and a new one is opened automatically.
-  // If your Django consumer needs auth, append it here, e.g. `?token=${token}`
-  // (browsers cannot send an Authorization header on a WebSocket).
+  const accessToken = localStorage.getItem("access");
   const socketUrl =
-    conversationId && WS_BASE_URL
-      ? `${WS_BASE_URL}/ws/conversations/${conversationId}/`
+    conversationId && WS_BASE_URL && accessToken
+      ? `${WS_BASE_URL}/ws/conversations/${conversationId}/?token=${encodeURIComponent(accessToken)}`
       : null;
 
   const handleSocketMessage = (event: MessageEvent) => {
@@ -531,13 +530,13 @@ export default function ChatSection() {
         </div>
 
         <div className="flex shrink-0 items-center gap-0.5 sm:gap-1">
-          <HeaderAction label="Video call" className={TINT.green}>
+          {/* <HeaderAction label="Video call" className={TINT.green}>
             <Video className="h-5 w-5" />
           </HeaderAction>
 
           <HeaderAction label="Voice call" className={TINT.green}>
             <Phone className="h-5 w-5" />
-          </HeaderAction>
+          </HeaderAction> */}
 
           <HeaderAction label="Search messages" className={TINT.blue}>
             <Search className="h-5 w-5" />

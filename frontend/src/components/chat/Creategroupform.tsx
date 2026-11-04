@@ -29,7 +29,7 @@ export default function CreateGroupForm({ onDone }: Props) {
     return users.filter(
       (u) =>
         u.name.toLowerCase().includes(query) ||
-        u.subtitle.toLowerCase().includes(query),
+        (u.subtitle ?? "").toLowerCase().includes(query),
     );
   }, [users, search]);
 
@@ -82,12 +82,12 @@ export default function CreateGroupForm({ onDone }: Props) {
         <ScrollArea className="h-56 rounded-md border">
           <div className="p-1">
             {filteredUsers.map((user) => {
-              const isSelected = selected.has(user.key);
+              const isSelected = selected.has(user.apiId);
               return (
                 <button
                   key={user.key}
                   type="button"
-                  onClick={() => toggle(user.key)}
+                  onClick={() => toggle(user.apiId)}
                   className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-accent/50"
                 >
                   <ConversationAvatar

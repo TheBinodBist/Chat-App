@@ -25,29 +25,28 @@ class JWTAuthMiddleware:
     def __init__(self, app):
         self.app = app
 
+    async def __call__(self, scope, receive, send):
+        query_string = scope.get("query_string", b"").decode("utf-8")
+        query_params = parse_qs(query_string)
 
-async def __call__(self, scope, receive, send):
-    query_string = scope.get("query_string", b"").decode("utf-8")
-    query_params = parse_qs(query_string)
+        tokens = query_params.get("token", [])
+        token = tokens[0] if tokens else None
 
-    tokens = query_params.get("token", [])
-    token = tokens[0] if tokens else None
+        # Safe debugging: never print the JWT itself.
+        print("WebSocket path:", scope.get("path"))
+        print("Query parameter names:", list(query_params.keys()))
+        print("JWT token received:", bool(token))
 
-    # Safe debugging: never print the JWT itself.
-    print("WebSocket path:", scope.get("path"))
-    print("Query parameter names:", list(query_params.keys()))
-    print("JWT token received:", bool(token))
+        if token:
+            user = await get_user_from_token(token)
+            print("JWT resolved user:", user)
+            scope["user"] = user
+        else:
+            scope["user"] = AnonymousUser()
 
-    if token:
-        user = await get_user_from_token(token)
-        print("JWT resolved user:", user)
-        scope["user"] = user
-    else:
-        scope["user"] = AnonymousUser()
+        print(
+            "JWT middleware authenticated:",
+            scope["user"].is_authenticated,
+        )
 
-    print(
-        "JWT middleware authenticated:",
-        scope["user"].is_authenticated,
-    )
-
-    return await self.app(scope, receive, send)
+        return await self.app(scope, receive, send)

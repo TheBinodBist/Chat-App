@@ -26,7 +26,7 @@ export const userToConversation = (user: ApiUser): Conversation => {
 
   return {
     key,
-    apiId: user.id,
+    apiId: String(user.id),
     kind: "user",
     name,
     subtitle: user.email || (user.username ? `@${user.username}` : ""),
@@ -43,7 +43,7 @@ export const groupToConversation = (group: ApiGroup): Conversation => {
 
   return {
     key,
-    apiId: group.id,
+    apiId: String(group.id),
     kind: "group",
     name,
     subtitle:

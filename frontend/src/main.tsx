@@ -6,9 +6,11 @@ import { BrowserRouter } from "react-router-dom";
 import { ErrorBoundary } from "./ErrorBoundary.tsx";
 
 createRoot(document.getElementById("root")!).render(
-  <BrowserRouter>
-    <ErrorBoundary>
-      <App />
-    </ErrorBoundary>
-  </BrowserRouter>,
+  <StrictMode>
+    <BrowserRouter>
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
+    </BrowserRouter>
+  </StrictMode>,
 );

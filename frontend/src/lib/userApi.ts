@@ -3,6 +3,11 @@ import type { ApiUser } from "../components/chat/types";
 
 const USER_ENDPOINT = "/users"; 
 
+export async function getCurrentUser(): Promise<ApiUser> {
+  const response = await api.get("/me/");
+  return response.data;
+}
+
 export async function getUsers(): Promise<ApiUser[]> {
   const response = await api.get(`${USER_ENDPOINT}/`);
   const data = response.data;
