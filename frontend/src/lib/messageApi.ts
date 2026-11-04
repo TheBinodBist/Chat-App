@@ -1,5 +1,6 @@
+import type { ApiGroup, ChatMessage } from "../components/chat/types";
 import api from "#lib/axiosInstance";
-import type { ChatMessage } from "../components/chat/types";
+
 
 const CONVERSATION_ENDPOINT = "/conversations";
 const MESSAGE_ENDPOINT = "/messages";
@@ -8,6 +9,19 @@ export async function createConversation(userId: string) {
   const response = await api.post(`${CONVERSATION_ENDPOINT}/create/`, {
     Conversation_type: "direct",
     member_ids: [userId],
+  });
+
+  return response.data;
+}
+
+export async function createGroupConversation(
+  name: string,
+  memberIds: string[],
+): Promise<ApiGroup> {
+  const response = await api.post(`${CONVERSATION_ENDPOINT}/create/`, {
+    Conversation_type: "group",
+    name,
+    member_ids: memberIds,
   });
 
   return response.data;
@@ -38,4 +52,12 @@ export async function createMessage(
   );
 
   return response.data;
+  
+}
+
+
+export async function getConversations(): Promise<ApiGroup[]> {
+  const response = await api.get(`${CONVERSATION_ENDPOINT}/`);
+  const data = response.data;
+  return Array.isArray(data) ? data : (data.results ?? []);
 }

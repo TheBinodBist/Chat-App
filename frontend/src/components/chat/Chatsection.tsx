@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent } from "react";
+import type { FormEvent, ReactNode } from "react";
 
 import {
   MessageCircle,
@@ -22,16 +22,175 @@ import {
 } from "#components/ui/tooltip";
 
 import { useChatStore } from "#lib/chatStore";
-import { cn } from "#lib/utils";
-import { SIGNAL_BLUE } from "../../lib/constants";
+import { SIGNAL_BLUE } from "#lib/constants";
 import {
   createConversation,
   createMessage,
   getMessages,
 } from "#lib/messageApi";
+import { cn } from "#lib/utils";
 
 import ConversationAvatar from "./ConversationAvatar";
 import type { ChatMessage, Conversation } from "./types";
+
+/* WhatsApp-style palette. Change the colors here. */
+const WA_GREEN = "bg-[#00A884] text-white hover:bg-[#008f72]";
+
+const TINT = {
+  green: "text-[#00A884] hover:bg-[#00A884]/10 hover:text-[#00A884]",
+  blue: "text-[#53BDEB] hover:bg-[#53BDEB]/10 hover:text-[#53BDEB]",
+  amber: "text-[#F5A623] hover:bg-[#F5A623]/10 hover:text-[#F5A623]",
+};
+
+const WS_BASE_URL = (
+  import.meta.env.VITE_WS_URL as string | undefined
+)?.replace(/\/+$/, "");
+
+function isSentByMe(sender: unknown, meAliases: string[]): boolean {
+  if (meAliases.length === 0) return false;
+
+  const candidates: unknown[] =
+    typeof sender === "object" && sender !== null
+      ? [
+          (sender as Record<string, unknown>).id,
+          (sender as Record<string, unknown>).username,
+          (sender as Record<string, unknown>).email,
+        ]
+      : [sender];
+
+  return candidates.some(
+    (value) =>
+      (typeof value === "string" || typeof value === "number") &&
+      meAliases.includes(String(value).toLowerCase()),
+  );
+}
+
+/**
+ * Adds a message to the list, or skips/replaces it if the id already exists.
+ * The same message can arrive twice (REST response + WebSocket broadcast),
+ * so ids are compared as strings to avoid number-vs-string mismatches.
+ */
+function mergeMessage(
+  list: ChatMessage[],
+  msg: ChatMessage,
+  overwrite = false,
+): ChatMessage[] {
+  const index = list.findIndex((item) => String(item.id) === String(msg.id));
+
+  if (index === -1) return [...list, msg];
+  if (!overwrite) return list;
+
+  const next = list.slice();
+  next[index] = msg;
+  return next;
+}
+
+type SocketStatus = "idle" | "connecting" | "open" | "closed";
+
+const MAX_RECONNECT_ATTEMPTS = 10;
+
+/**
+ * Small native WebSocket hook with exponential-backoff reconnect.
+ * Pass `null` to stay disconnected. Changing `url` closes the old socket
+ * and opens a new one.
+ */
+function useChatSocket(
+  url: string | null,
+  onMessage: (event: MessageEvent) => void,
+): SocketStatus {
+  const [status, setStatus] = useState<SocketStatus>("idle");
+  const onMessageRef = useRef(onMessage);
+
+  useEffect(() => {
+    onMessageRef.current = onMessage;
+  });
+
+  useEffect(() => {
+    if (!url) {
+      setStatus("idle");
+      return;
+    }
+
+    let socket: WebSocket | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let attempts = 0;
+    let disposed = false;
+
+    const connect = () => {
+      setStatus("connecting");
+      socket = new WebSocket(url);
+
+      socket.onopen = () => {
+        attempts = 0;
+        setStatus("open");
+      };
+
+      socket.onmessage = (event) => onMessageRef.current(event);
+
+      socket.onerror = () => {
+        console.error("WebSocket connection error");
+      };
+
+      socket.onclose = () => {
+        if (disposed) return;
+        setStatus("closed");
+
+        if (attempts < MAX_RECONNECT_ATTEMPTS) {
+          const delay = Math.min(1000 * 2 ** attempts, 15000);
+          attempts += 1;
+          retryTimer = setTimeout(connect, delay);
+        }
+      };
+    };
+
+    connect();
+
+    return () => {
+      disposed = true;
+      clearTimeout(retryTimer);
+
+      if (socket) {
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onerror = null;
+        socket.onclose = null;
+        socket.close();
+      }
+    };
+  }, [url]);
+
+  return status;
+}
+
+/* Base UI tooltips use `render`, not Radix's `asChild`. */
+function HeaderAction({
+  label,
+  className,
+  children,
+}: {
+  label: string;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className={cn("rounded-full", className)}
+            aria-label={label}
+          />
+        }
+      >
+        {children}
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  );
+}
 
 type ResolvedConversation = {
   key: string;
@@ -47,10 +206,21 @@ type ConversationCreateResponse = {
   };
 };
 
+type SocketPayload = {
+  type?: string;
+  id?: string | number;
+  conversation_id?: string | number;
+  message?: string;
+  created_at?: string;
+  sender?: unknown;
+  sender_id?: unknown;
+};
+
 export default function ChatSection() {
   const users = useChatStore((s) => s.users);
   const groups = useChatStore((s) => s.groups);
   const selectedKey = useChatStore((s) => s.selectedKey);
+  const meAliases = useChatStore((s) => s.meAliases);
 
   const conversation = useMemo(
     () =>
@@ -59,7 +229,6 @@ export default function ChatSection() {
   );
 
   const [resolved, setResolved] = useState<ResolvedConversation | null>(null);
-
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
@@ -70,14 +239,68 @@ export default function ChatSection() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const activeConversationRef = useRef<string | null>(null);
 
-  const conversationId =
-    conversation?.conversationId ??
-    (conversation?.kind === "group" ? conversation.apiId : null) ??
-    (resolved?.key === selectedKey ? resolved.id : null);
+  // Always a string (or null) so it is safe to use as an effect dependency.
+  const conversationId: string | null = (() => {
+    const id =
+      conversation?.conversationId ??
+      (conversation?.kind === "group" ? conversation.apiId : null) ??
+      (resolved?.key === selectedKey ? resolved.id : null);
+
+    return id === null || id === undefined || String(id) === ""
+      ? null
+      : String(id);
+  })();
 
   activeConversationRef.current = conversationId;
 
-  // Open a direct conversation if this user does not already have one.
+  /* ---------------------------- WebSocket ---------------------------- */
+
+  // `null` means "don't connect". When conversationId changes, the old
+  // socket is closed and a new one is opened automatically.
+  const accessToken = localStorage.getItem("access");
+  const socketUrl =
+    conversationId && WS_BASE_URL && accessToken
+      ? `${WS_BASE_URL}/ws/conversations/${conversationId}/?token=${encodeURIComponent(accessToken)}`
+      : null;
+
+  const handleSocketMessage = (event: MessageEvent) => {
+    let data: SocketPayload;
+
+    try {
+      data = JSON.parse(event.data) as SocketPayload;
+    } catch {
+      return;
+    }
+
+    if (data.type === "error") {
+      setError(data.message ?? "Something went wrong.");
+      return;
+    }
+
+    if (data.type !== "message") return;
+
+    // Ignore anything that belongs to a conversation we are no longer viewing.
+    if (
+      data.conversation_id !== undefined &&
+      String(data.conversation_id) !== activeConversationRef.current
+    ) {
+      return;
+    }
+
+    const incoming = {
+      id: data.id,
+      content: data.message,
+      created_at: data.created_at ?? new Date().toISOString(),
+      is_mine: isSentByMe(data.sender ?? data.sender_id, meAliases),
+    } as ChatMessage;
+
+    setMessages((previous) => mergeMessage(previous, incoming));
+  };
+
+  const socketStatus = useChatSocket(socketUrl, handleSocketMessage);
+
+  /* ------------------------ Open / resolve chat ------------------------ */
+
   useEffect(() => {
     let active = true;
 
@@ -92,7 +315,6 @@ export default function ChatSection() {
       return;
     }
 
-    // Capture a non-null value for use in the async function.
     const selectedConversation: Conversation = conversation;
 
     if (
@@ -160,28 +382,37 @@ export default function ChatSection() {
     conversation?.conversationId,
   ]);
 
-  // Fetch messages once the conversation UUID is available.
+  // Declared after the reset effect above so this error is not wiped by it.
+  useEffect(() => {
+    if (conversationId && !WS_BASE_URL) {
+      setError("WebSocket URL is not configured (VITE_WS_URL).");
+    }
+  }, [conversationId]);
+
+  /* --------------------------- Load history --------------------------- */
+
   useEffect(() => {
     let active = true;
 
     setMessages([]);
     setLoading(false);
 
-    if (!conversationId) {
-      return;
-    }
+    if (!conversationId) return;
 
-    // TypeScript now knows this is a string.
     const id = conversationId;
 
     async function fetchMessages() {
       setLoading(true);
 
       try {
-        const data = await getMessages(id);
+        const history = await getMessages(id);
 
         if (active) {
-          setMessages(data);
+          // Keep any live messages that arrived over the socket while the
+          // history request was still in flight.
+          setMessages((live) =>
+            live.reduce((acc, item) => mergeMessage(acc, item), history),
+          );
           setError("");
         }
       } catch (err) {
@@ -202,17 +433,17 @@ export default function ChatSection() {
     return () => {
       active = false;
     };
-  }, [conversationId, selectedKey]);
+  }, [conversationId]);
 
-  // Scroll to the newest message.
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({
       behavior: "smooth",
       block: "end",
     });
-  }, [messages]);
+  }, [messages, loading, opening]);
 
-  // Send a message.
+  /* ----------------------------- Sending ----------------------------- */
+
   const sendMessage = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
 
@@ -230,7 +461,6 @@ export default function ChatSection() {
     }
 
     const targetConversationId = conversationId;
-    const targetKey = selectedKey;
 
     setSending(true);
     setError("");
@@ -238,16 +468,10 @@ export default function ChatSection() {
     try {
       const newMessage = await createMessage(targetConversationId, content);
 
-      if (
-        activeConversationRef.current === targetConversationId &&
-        targetKey === selectedKey
-      ) {
-        setMessages((prev) =>
-          prev.some((item) => item.id === newMessage.id)
-            ? prev
-            : [...prev, newMessage],
-        );
-
+      if (activeConversationRef.current === targetConversationId) {
+        // overwrite: the REST response is the source of truth for `is_mine`
+        // if the socket echo got here first.
+        setMessages((prev) => mergeMessage(prev, newMessage, true));
         setMessage((current) => (current === content ? "" : current));
       }
     } catch (err) {
@@ -261,38 +485,40 @@ export default function ChatSection() {
     }
   };
 
-  // No chat selected.
+  /* ------------------------------ Render ------------------------------ */
+
   if (!conversation) {
     return (
-      <main className="hidden min-w-0 flex-1 flex-col bg-background md:flex">
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+      <main className="flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background">
+        <div className="flex flex-1 flex-col items-center justify-center gap-4 p-6 text-center">
           <div
             className={cn(
-              "flex h-16 w-16 items-center justify-center rounded-full text-white",
+              "flex h-20 w-20 items-center justify-center rounded-full text-white shadow-sm",
               SIGNAL_BLUE,
             )}
           >
-            <MessageCircle className="h-8 w-8" />
+            <MessageCircle className="h-9 w-9" />
           </div>
 
-          <h2 className="text-xl font-semibold">Connectly</h2>
-
-          <p className="max-w-xs text-sm text-muted-foreground">
-            Select a chat from the list to start messaging.
-          </p>
+          <div className="space-y-2">
+            <h2 className="text-2xl font-semibold tracking-tight">Connectly</h2>
+            <p className="max-w-sm text-sm leading-6 text-muted-foreground">
+              Select a conversation to start messaging your friends and groups.
+            </p>
+          </div>
         </div>
       </main>
     );
   }
 
   return (
-    <main className="hidden min-h-0 min-w-0 flex-1 flex-col bg-background md:flex">
-      {/* Header */}
-      <header className="flex items-center gap-3 border-b bg-card px-4 py-3 sm:px-6">
+    <main className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background">
+      {/* Fixed conversation header */}
+      <header className="z-10 flex h-[72px] shrink-0 items-center gap-3 border-b bg-card px-3 sm:px-5">
         <ConversationAvatar Conversation={conversation} className="h-10 w-10" />
 
         <div className="min-w-0 flex-1">
-          <h2 className="truncate font-semibold leading-tight">
+          <h2 className="truncate text-sm font-semibold sm:text-base">
             {conversation.name}
           </h2>
 
@@ -303,51 +529,18 @@ export default function ChatSection() {
           )}
         </div>
 
-        <div className="flex items-center gap-1">
-          <Tooltip>
-            <TooltipTrigger>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="rounded-full"
-                aria-label="Video call"
-              >
-                <Video className="h-5 w-5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Video call</TooltipContent>
-          </Tooltip>
+        <div className="flex shrink-0 items-center gap-0.5 sm:gap-1">
+          {/* <HeaderAction label="Video call" className={TINT.green}>
+            <Video className="h-5 w-5" />
+          </HeaderAction>
 
-          <Tooltip>
-            <TooltipTrigger>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="rounded-full"
-                aria-label="Voice call"
-              >
-                <Phone className="h-5 w-5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Voice call</TooltipContent>
-          </Tooltip>
+          <HeaderAction label="Voice call" className={TINT.green}>
+            <Phone className="h-5 w-5" />
+          </HeaderAction> */}
 
-          <Tooltip>
-            <TooltipTrigger>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="rounded-full"
-                aria-label="Search"
-              >
-                <Search className="h-5 w-5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Search</TooltipContent>
-          </Tooltip>
+          <HeaderAction label="Search messages" className={TINT.blue}>
+            <Search className="h-5 w-5" />
+          </HeaderAction>
 
           <Button
             type="button"
@@ -361,80 +554,113 @@ export default function ChatSection() {
         </div>
       </header>
 
-      {/* Messages */}
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4">
-        {opening ? (
-          <div className="flex flex-1 items-center justify-center">
-            <p className="text-sm text-muted-foreground">
-              Opening conversation...
+      {conversationId && socketStatus === "closed" && (
+        <div
+          role="status"
+          className="shrink-0 bg-amber-100 px-4 py-1 text-center text-xs text-amber-900 dark:bg-amber-950 dark:text-amber-200"
+        >
+          Reconnecting…
+        </div>
+      )}
+
+      <div className="relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto bg-[#EFEAE2] dark:bg-[#0B141A]">
+        <div className="mx-auto flex min-h-full w-full max-w-5xl flex-col px-3 py-5 sm:px-6 sm:py-6">
+          {opening ? (
+            <div className="flex flex-1 items-center justify-center">
+              <p className="text-sm text-muted-foreground">
+                Opening conversation...
+              </p>
+            </div>
+          ) : loading ? (
+            <div className="flex flex-1 items-center justify-center">
+              <p className="text-sm text-muted-foreground">
+                Loading messages...
+              </p>
+            </div>
+          ) : messages.length === 0 ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 py-10 text-center">
+              <ConversationAvatar
+                Conversation={conversation}
+                className="h-20 w-20"
+                textClassName="text-2xl"
+                iconClassName="h-9 w-9"
+              />
+
+              <h3 className="text-lg font-semibold">{conversation.name}</h3>
+
+              <p className="max-w-xs text-sm text-muted-foreground">
+                {conversationId
+                  ? "No messages yet. Say hello 👋"
+                  : "Open a conversation to start messaging."}
+              </p>
+            </div>
+          ) : (
+            <div className="mt-auto flex w-full flex-col gap-2">
+              {messages.map((msg) => {
+                const isMine = msg.is_mine === true;
+
+                return (
+                  <div
+                    key={msg.id}
+                    className={cn(
+                      "flex w-full",
+                      isMine ? "justify-end" : "justify-start",
+                    )}
+                  >
+                    <div
+                      className={cn(
+                        "max-w-[85%] break-words rounded-2xl px-4 py-2.5 shadow-sm sm:max-w-[75%]",
+                        isMine
+                          ? "rounded-br-md bg-[#D9FDD3] text-[#111B21] dark:bg-[#005C4B] dark:text-[#E9EDEF]"
+                          : "rounded-bl-md bg-white text-[#111B21] dark:bg-[#202C33] dark:text-[#E9EDEF]",
+                      )}
+                    >
+                      <p className="whitespace-pre-wrap break-words text-sm leading-6">
+                        {msg.content}
+                      </p>
+
+                      <p className="mt-1 text-right text-[10px] text-[#667781] dark:text-[#8696A0]">
+                        {new Date(msg.created_at).toLocaleTimeString([], {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </p>
+                    </div>
+                  </div>
+                );
+              })}
+
+              <div ref={messagesEndRef} />
+            </div>
+          )}
+
+          {error && (
+            <p role="alert" className="mt-3 text-center text-sm text-red-500">
+              {error}
             </p>
-          </div>
-        ) : loading ? (
-          <div className="flex flex-1 items-center justify-center">
-            <p className="text-sm text-muted-foreground">Loading messages...</p>
-          </div>
-        ) : messages.length === 0 ? (
-          <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
-            <ConversationAvatar
-              Conversation={conversation}
-              className="h-20 w-20"
-              textClassName="text-2xl"
-              iconClassName="h-9 w-9"
-            />
-
-            <h3 className="text-lg font-semibold">{conversation.name}</h3>
-
-            <p className="max-w-xs text-sm text-muted-foreground">
-              {conversationId
-                ? "No messages yet. Say hello 👋"
-                : "Open a conversation to start messaging."}
-            </p>
-          </div>
-        ) : (
-          <div className="flex flex-col gap-3">
-            {messages.map((msg) => (
-              <div key={msg.id} className="flex justify-start">
-                <div className="max-w-[75%] rounded-2xl bg-muted px-4 py-2">
-                  <p className="break-words text-sm">{msg.content}</p>
-
-                  <p className="mt-1 text-right text-[10px] text-muted-foreground">
-                    {new Date(msg.created_at).toLocaleTimeString([], {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })}
-                  </p>
-                </div>
-              </div>
-            ))}
-
-            <div ref={messagesEndRef} />
-          </div>
-        )}
-
-        {error && (
-          <p role="alert" className="mt-3 text-center text-sm text-red-500">
-            {error}
-          </p>
-        )}
+          )}
+        </div>
       </div>
 
-      {/* Message composer */}
       <form
         onSubmit={sendMessage}
-        className="border-t bg-card px-4 py-3 sm:px-6"
+        className="z-10 shrink-0 border-t bg-card px-3 py-3 sm:px-5 sm:py-4"
       >
-        <div className="flex items-center gap-2">
+        <div className="mx-auto flex w-full max-w-5xl items-center gap-2">
           <Button
             type="button"
             variant="ghost"
             size="icon"
-            className="shrink-0 rounded-full"
-            aria-label="Attach"
+            className={cn(
+              "h-10 w-10 shrink-0 rounded-full sm:h-11 sm:w-11",
+              TINT.blue,
+            )}
+            aria-label="Attach file"
           >
             <Paperclip className="h-5 w-5" />
           </Button>
 
-          <div className="relative flex-1">
+          <div className="relative min-w-0 flex-1">
             <Input
               type="text"
               value={message}
@@ -442,15 +668,18 @@ export default function ChatSection() {
               placeholder={
                 opening ? "Opening conversation..." : "Send a message"
               }
-              disabled={opening || !conversationId}
-              className="h-11 rounded-full border-0 bg-muted pl-4 pr-11 shadow-none focus-visible:ring-1"
+              disabled={opening || !conversationId || sending}
+              className="h-11 rounded-full border-0 bg-muted pl-4 pr-12 shadow-none focus-visible:ring-1"
             />
 
             <Button
               type="button"
               variant="ghost"
               size="icon"
-              className="absolute right-1 top-1/2 h-9 w-9 -translate-y-1/2 rounded-full"
+              className={cn(
+                "absolute right-1 top-1/2 h-9 w-9 -translate-y-1/2 rounded-full",
+                TINT.amber,
+              )}
               aria-label="Emoji"
             >
               <Smile className="h-5 w-5" />
@@ -462,10 +691,7 @@ export default function ChatSection() {
               type="submit"
               size="icon"
               disabled={sending || opening || !conversationId}
-              className={cn(
-                "h-11 w-11 shrink-0 rounded-full text-white hover:bg-[#2459c9]",
-                SIGNAL_BLUE,
-              )}
+              className={cn("h-11 w-11 shrink-0 rounded-full", WA_GREEN)}
               aria-label="Send message"
             >
               <Send className="h-5 w-5" />
@@ -473,9 +699,8 @@ export default function ChatSection() {
           ) : (
             <Button
               type="button"
-              variant="ghost"
               size="icon"
-              className="h-11 w-11 shrink-0 rounded-full"
+              className={cn("h-11 w-11 shrink-0 rounded-full", WA_GREEN)}
               aria-label="Voice message"
             >
               <Mic className="h-5 w-5" />

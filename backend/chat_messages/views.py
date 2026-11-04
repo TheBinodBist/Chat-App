@@ -1,5 +1,7 @@
 from django.shortcuts import get_object_or_404
 
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -18,7 +20,7 @@ def message_view(request, conversation_id):
         id=conversation_id,
     )
 
-    # Check whether the current user belongs to this conversation.
+
     is_member = conversation.members.filter(id=request.user.id).exists()
 
     if not is_member:
@@ -27,7 +29,6 @@ def message_view(request, conversation_id):
             status=status.HTTP_403_FORBIDDEN,
         )
 
-    # Fetch messages.
     if request.method == "GET":
         messages = (
             Message.objects.filter(conservation=conversation)
@@ -35,16 +36,38 @@ def message_view(request, conversation_id):
             .order_by("created_at")
         )
 
-        serializer = MessageSerializer(messages, many=True)
+        serializer = MessageSerializer(
+            messages,
+            many=True,
+            context={"request": request},  
+        )
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     # Create a message.
-    serializer = MessageSerializer(data=request.data)
+    serializer = MessageSerializer(
+        data=request.data,
+        context={"request": request}, 
+    )
 
     if serializer.is_valid():
-        serializer.save(
+        message = serializer.save(
             sender=request.user,
             conservation=conversation,
+        )
+
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            f"conversation_{conversation.id}",
+            {
+                "type": "chat_message",
+                "message": {
+                    "id": str(message.id),
+                    "conversation_id": str(conversation.id),
+                    "sender_id": str(request.user.pk),
+                    "message": message.content,
+                    "created_at": message.created_at.isoformat(),
+                },
+            },
         )
 
         return Response(

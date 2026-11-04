@@ -24,7 +24,7 @@ export type Conversation = {
   kind: "user" | "group";
   name: string;
   subtitle?: string;
-  initials: string;
+  initials?: string;
   color: string;
 };
 
@@ -34,4 +34,5 @@ export type ChatMessage = {
   sender: string;
   content: string;
   created_at: string;
+  is_mine:boolean
 };

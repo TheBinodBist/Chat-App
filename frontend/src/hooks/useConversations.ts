@@ -1,105 +1,72 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { ApiGroup, ApiUser, Conversation } from "../components/chat/types";
+import { useEffect, useRef, useState } from "react";
 
-import api from "#lib/axiosInstance";
-import {
-  extractList,
-  getErrorMessage,
-  groupToConversation,
-  userToConversation,
-} from "#lib/utils";
-import {
-  CONVERSATIONS_ENDPOINT,
-  CREATE_CONVERSATION_ENDPOINT,
-  USERS_ENDPOINT,
-} from "#lib/constants";
+interface UseConversationSocketOptions {
+  conversationId: string;
+  accessToken: string | null;
+}
 
-export function useConversations() {
-  const [users, setUsers] = useState<Conversation[]>([]);
-  const [groups, setGroups] = useState<Conversation[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchAll = useCallback(async (signal?: AbortSignal) => {
-    setLoading(true);
-    setError(null);
-
-    const [usersRes, conversationsRes] = await Promise.allSettled([
-      api.get(USERS_ENDPOINT, { signal }),
-      api.get(CONVERSATIONS_ENDPOINT, { signal }),
-    ]);
-
-    if (signal?.aborted) return;
-
-
-    if (conversationsRes.status === "rejected") {
-      console.error("Couldn't load conversations:", conversationsRes.reason);
-    }
-
-    if (usersRes.status === "fulfilled") {
-      setUsers(
-        extractList<ApiUser>(usersRes.value.data).map(userToConversation),
-      );
-    } else {
-      setError(
-        getErrorMessage(
-          usersRes.reason,
-          "Couldn't load your chats. Please try again.",
-        ),
-      );
-    }
-
-
-    if (conversationsRes.status === "fulfilled") {
-      setGroups(
-        extractList<ApiGroup>(conversationsRes.value.data)
-          .filter((c) => c.Conversation_type === "group")
-          .map(groupToConversation),
-      );
-    }
-
-    setLoading(false);
-  }, []);
+export function useConversationSocket({
+  conversationId,
+  accessToken,
+}: UseConversationSocketOptions) {
+  const socketRef = useRef<WebSocket | null>(null);
+  const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    const controller = new AbortController();
-    fetchAll(controller.signal);
-    return () => controller.abort();
-  }, [fetchAll]);
+    if (!accessToken || !conversationId) {
+      setConnected(false);
+      return;
+    }
 
-  const addGroup = useCallback((group: Conversation) => {
-    setGroups((prev) => [group, ...prev.filter((g) => g.key !== group.key)]);
-  }, []);
+    const baseUrl = import.meta.env.VITE_WS_URL ?? "ws://127.0.0.1:8000";
 
+    const url = new URL(`${baseUrl}/ws/conversations/${conversationId}/`);
 
-  const createGroup = useCallback(
-    async (name: string, memberKeys: string[]) => {
-      const memberIds = users
-        .filter((u) => memberKeys.includes(u.key))
-        .map((u) => u.apiId);
+    url.searchParams.set("token", accessToken);
 
-      const { data } = await api.post(CREATE_CONVERSATION_ENDPOINT, {
-        conversation_type: "group",
-        name,
-        member_ids: memberIds,
-      });
+    const socket = new WebSocket(url.toString());
+    socketRef.current = socket;
 
-      const group = groupToConversation(data);
-      addGroup(group);
-      return group;
-    },
-    [users, addGroup],
-  );
+    socket.onopen = () => {
+      setConnected(true);
+      console.log("WebSocket connected");
+    };
 
-  const conversations = useMemo(() => [...groups, ...users], [groups, users]);
+    socket.onmessage = (event: MessageEvent<string>) => {
+      try {
+        const message: unknown = JSON.parse(event.data);
+        console.log("WebSocket message:", message);
+      } catch {
+        console.error("Received invalid JSON from WebSocket");
+      }
+    };
 
-  return {
-    users,
-    conversations,
-    loading,
-    error,
-    refetch: () => fetchAll(),
-    addGroup,
-    createGroup,
-  };
+    socket.onerror = () => {
+      console.error("WebSocket connection error");
+    };
+
+    socket.onclose = (event) => {
+      setConnected(false);
+      console.log("WebSocket closed:", event.code, event.reason);
+    };
+
+    return () => {
+      socket.close();
+      socketRef.current = null;
+      setConnected(false);
+    };
+  }, [conversationId, accessToken]);
+
+  function sendMessage(payload: unknown) {
+    const socket = socketRef.current;
+
+    if (socket?.readyState !== WebSocket.OPEN) {
+      console.error("WebSocket is not connected");
+      return;
+    }
+
+    socket.send(JSON.stringify(payload));
+  }
+
+  return { connected, sendMessage };
 }
